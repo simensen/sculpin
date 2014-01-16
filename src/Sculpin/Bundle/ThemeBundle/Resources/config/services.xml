@@ -29,6 +29,7 @@
         <service id="sculpin_theme.theme_twig_loader" class="%sculpin_theme.theme_twig_loader.class%">
             <argument type="service" id="sculpin_theme.theme_registry" />
             <argument>%sculpin_twig.extensions%</argument>
+            <tag name="kernel.event_subscriber" />
             <tag name="twig.loaders.append" />
         </service>
 

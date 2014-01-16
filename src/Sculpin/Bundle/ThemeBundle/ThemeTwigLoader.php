@@ -3,28 +3,41 @@
 namespace Sculpin\Bundle\ThemeBundle;
 
 use Sculpin\Bundle\TwigBundle\FlexibleExtensionFilesystemLoader;
+use Sculpin\Core\Event\SourceSetEvent;
+use Sculpin\Core\Sculpin;
+use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 
-class ThemeTwigLoader implements \Twig_LoaderInterface, \Twig_ExistsLoaderInterface
+class ThemeTwigLoader implements \Twig_LoaderInterface, EventSubscriberInterface
 {
-    private $chainLoader;
+    private $themeRegistry;
+    private $extensions;
+    private $flexibleExtensionFilesystemLoader;
 
     public function __construct(ThemeRegistry $themeRegistry, array $extensions)
     {
-        $loaders = array();
+        $this->themeRegistry = $themeRegistry;
+        $this->extensions = $extensions;
+    }
 
-        $theme = $themeRegistry->findActiveTheme();
+    private function initThemeLoader()
+    {
+        $paths = array();
+
+        $theme = $this->themeRegistry->findActiveTheme();
         if (null !== $theme) {
             $paths = $this->findPaths($theme);
             if (isset($theme['parent'])) {
                 $paths = $this->findPaths($theme['parent'], $paths);
             }
-
-            if ($paths) {
-                $loaders[] = new FlexibleExtensionFilesystemLoader('', array(), $paths, $extensions);
-            }
         }
+        $this->flexibleExtensionFilesystemLoader = new FlexibleExtensionFilesystemLoader(
+            '',
+            array(),
+            $paths,
+            $this->extensions
+        );
 
-        $this->chainLoader = new \Twig_Loader_Chain($loaders);
+        $this->flexibleExtensionFilesystemLoader->refreshCache();
     }
 
     private function findPaths($theme, array $paths = array())
@@ -43,15 +56,7 @@ class ThemeTwigLoader implements \Twig_LoaderInterface, \Twig_ExistsLoaderInterf
      */
     public function getSource($name)
     {
-        return $this->chainLoader->getSource($name);
-    }
-
-    /**
-     * {@inheritdoc}
-     */
-    public function exists($name)
-    {
-        return $this->chainLoader->exists($name);
+        return $this->flexibleExtensionFilesystemLoader->getSource($name);
     }
 
     /**
@@ -59,7 +64,7 @@ class ThemeTwigLoader implements \Twig_LoaderInterface, \Twig_ExistsLoaderInterf
      */
     public function getCacheKey($name)
     {
-        return $this->chainLoader->getCacheKey($name);
+        return $this->flexibleExtensionFilesystemLoader->getCacheKey($name);
     }
 
     /**
@@ -67,6 +72,23 @@ class ThemeTwigLoader implements \Twig_LoaderInterface, \Twig_ExistsLoaderInterf
      */
     public function isFresh($name, $time)
     {
-        return $this->chainLoader->isFresh($name, $time);
+        return $this->flexibleExtensionFilesystemLoader->isFresh($name, $time);
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public static function getSubscribedEvents()
+    {
+        return array(
+            Sculpin::EVENT_BEFORE_RUN => 'beforeRun',
+        );
+    }
+
+    public function beforeRun(SourceSetEvent $sourceSetEvent)
+    {
+        if ($sourceSetEvent->sourceSet()->newSources()) {
+            $this->initThemeLoader();
+        }
     }
 }

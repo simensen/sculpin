@@ -11,6 +11,8 @@
 
 namespace Sculpin\Bundle\TwigBundle;
 
+use Dflydev\Symfony\FinderFactory\FinderFactory;
+use Dflydev\Symfony\FinderFactory\FinderFactoryInterface;
 use Sculpin\Core\Event\SourceSetEvent;
 use Sculpin\Core\Sculpin;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
@@ -29,9 +31,16 @@ class FlexibleExtensionFilesystemLoader implements \Twig_LoaderInterface, EventS
      */
     protected $filesystemLoader;
 
-    protected $cachedCacheKey = array();
-    protected $cachedCacheKeyExtension = array();
-    protected $cachedCacheKeyException = array();
+    protected $finderFactory;
+
+    protected $sourceDir;
+    protected $sourcePaths = array();
+    protected $paths = array();
+    protected $extensions= array();
+
+    protected $cachedActualNames = array();
+    protected $cachedNames = array();
+    protected $cachedExceptions = array();
 
     /**
      * Constructor.
@@ -39,26 +48,79 @@ class FlexibleExtensionFilesystemLoader implements \Twig_LoaderInterface, EventS
      * @param array  $paths      Paths
      * @param array  $extensions Extensions
      */
-    public function __construct($sourceDir, array $sourcePaths, array $paths, array $extensions)
+    public function __construct($sourceDir, array $sourcePaths, array $paths, array $extensions, FinderFactoryInterface $finderFactory = null)
     {
+        $this->sourceDir = $sourceDir;
+        $this->sourcePaths = $sourcePaths;
+        $this->paths = $paths;
+        $this->extensions = array_map(function($ext) {
+            return $ext?'.'.$ext:$ext;
+        }, $extensions);
+        $this->finderFactory = $finderFactory ?: new FinderFactory();
+    }
+
+    public function refreshCache()
+    {
+        $sourceDir = $this->sourceDir;
+
         $mappedSourcePaths = array_map(function ($path) use ($sourceDir) {
             return $sourceDir.'/'.$path;
-        }, $sourcePaths);
+        }, $this->sourcePaths);
 
         $allPaths = array_merge(
             array_filter($mappedSourcePaths, function($path) {
                 return file_exists($path);
             }),
-            array_filter($paths, function($path) {
+            array_filter($this->paths, function($path) {
                 return file_exists($path);
             })
         );
 
-        $this->filesystemLoader = new FilesystemLoader($allPaths);
-        $this->extensions = array_map(function($ext) {
-            return $ext?'.'.$ext:$ext;
-        }, $extensions);
+        $this->cachedActualNames = array();
+
+        foreach ($allPaths as $path) {
+            $filesystemLoader = new FilesystemLoader(array($path));
+
+            $files = $this
+                ->finderFactory->createFinder()
+                ->files()
+                ->ignoreVCS(true)
+                ->followLinks()
+                ->in($path);
+
+            foreach ($files as $file) {
+                if (isset($this->cachedActualNames[$file->getRelativePathName()])) {
+                    // We already know about this file.
+                    continue;
+                }
+
+                $this->cachedActualNames[$file->getRelativePathName()] = $filesystemLoader;
+            }
+        }
     }
+
+    protected function resolveName($name)
+    {
+        if (isset($this->cachedNames[$name])) {
+            return $this->cachedNames[$name];
+        }
+
+        if (isset($this->cachedExceptions[$name])) {
+            throw $this->cachedExceptions[$name];
+        }
+
+        foreach ($this->extensions as $extension) {
+            $actualName = $name.$extension;
+            if (isset($this->cachedActualNames[$actualName])) {
+                return $this->cachedNames[$name] = array($actualName, $this->cachedActualNames[$actualName]);
+            }
+        }
+
+        throw $this->cachedExceptions[$name] = new \Twig_Error_Loader(
+            sprintf('The template named "%s" does not exist.', $name)
+        );
+    }
+
 
     /**
      * Gets the source code of a template, given its name.
@@ -69,11 +131,9 @@ class FlexibleExtensionFilesystemLoader implements \Twig_LoaderInterface, EventS
      */
     public function getSource($name)
     {
-        $this->getCacheKey($name);
+        list ($actualName, $filesystemLoader) = $this->resolveName($name);
 
-        $extension = $this->cachedCacheKeyExtension[$name];
-
-        return $this->filesystemLoader->getSource($name.$extension);
+        return $filesystemLoader->getSource($actualName);
     }
 
     /**
@@ -85,29 +145,9 @@ class FlexibleExtensionFilesystemLoader implements \Twig_LoaderInterface, EventS
      */
     public function getCacheKey($name)
     {
-        if (isset($this->cachedCacheKey[$name])) {
-            $extension = $this->cachedCacheKeyExtension[$name];
+        list ($actualName, $filesystemLoader) = $this->resolveName($name);
 
-            return $this->cachedCacheKey[$name] = $this->filesystemLoader->getCacheKey($name.$extension);
-        }
-
-        if (isset($this->cachedCacheKeyException[$name])) {
-            throw $this->cachedCacheKeyException[$name];
-        }
-
-        foreach ($this->extensions as $extension) {
-            try {
-                $this->cachedCacheKey[$name] = $this->filesystemLoader->getCacheKey($name.$extension);
-                $this->cachedCacheKeyExtension[$name] = $extension;
-
-                return $this->cachedCacheKey[$name];
-            } catch (\Twig_Error_Loader $e) {
-            }
-        }
-
-        throw $this->cachedCacheKeyException[$name] = new \Twig_Error_Loader(
-            sprintf('Template "%s" is not defined.', $name)
-        );
+        return $filesystemLoader->getCacheKey($actualName);
     }
 
     /**
@@ -120,11 +160,9 @@ class FlexibleExtensionFilesystemLoader implements \Twig_LoaderInterface, EventS
      */
     public function isFresh($name, $time)
     {
-        $this->getCacheKey($name);
+        list ($actualName, $filesystemLoader) = $this->resolveName($name);
 
-        $extension = $this->cachedCacheKeyExtension[$name];
-
-        return $this->filesystemLoader->isFresh($name.$extension, $time);
+        return $filesystemLoader->isFresh($actualName.$extension, $time);
     }
 
     /**
@@ -140,9 +178,7 @@ class FlexibleExtensionFilesystemLoader implements \Twig_LoaderInterface, EventS
     public function beforeRun(SourceSetEvent $sourceSetEvent)
     {
         if ($sourceSetEvent->sourceSet()->newSources()) {
-            $this->cachedCacheKey = array();
-            $this->cachedCacheKeyExtension = array();
-            $this->cachedCacheKeyException = array();
+            $this->refreshCache();
         }
     }
 }
